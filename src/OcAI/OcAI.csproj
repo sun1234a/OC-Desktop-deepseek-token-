@@ -1,0 +1,127 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    OC DESKTOP AI companion plugin.
+
+    Build strategy: DIRECT references to the assemblies that ship with the game
+    instead of NuGet PackageReferences. The DSH file sandbox blocks the dotnet SDK
+    from completing TLS to api.nuget.org, and BepInEx 6's transitive graph cannot
+    be satisfied from a hand-built offline feed. Referencing the real runtime and
+    interop assemblies is fully offline and guarantees version alignment.
+
+      BepInEx\core\*     -> the loader/plugin API, provided at runtime
+      BepInEx\interop\*  -> this game's IL2CPP proxy assemblies (generated on the
+                            game's first run with BepInEx installed)
+
+    All references are Private=false: nothing gets copied next to the plugin,
+    the BepInEx runtime supplies everything.
+  -->
+
+  <PropertyGroup>
+    <!-- Compile-time references live in the WORKSPACE, not in the game folder.
+         gamefiles\ holds a copy of the game's BepInEx core + the IL2CPP interop
+         assemblies generated on its first run, so building never needs to touch
+         the installed game (which is kept pristine).
+         Override with -p:RefDir=... if the copy moves. -->
+    <RefDir Condition="'$(RefDir)' == ''">C:\Users\Lenovo\Desktop\ocdesktop-mod\gamefiles</RefDir>
+    <BepCore>$(RefDir)\core</BepCore>
+    <BepInterop>$(RefDir)\interop</BepInterop>
+
+    <!--
+      TargetFramework is overridable because of the offline/network situation:
+      this SDK ships ONLY the 8.0 targeting packs, and the 6.0 reference pack
+      (Microsoft.NETCore.App.Ref 6.0.x) cannot be downloaded here, so a plain
+      net6.0 build fails at restore with NU1100. Building against the 8.0
+      reference assemblies emits IL that the .NET 6 runtime inside BepInEx loads
+      fine, because nothing here uses a post-6.0 API:
+
+        dotnet build src\OcAI\OcAI.csproj -c Release -p:TargetFramework=net8.0
+    -->
+    <!-- net6.0 is the runtime BepInEx 6 boots the game with. The reference
+         assemblies come from ..\refpack via Directory.Build.props, because the
+         SDK's own net6.0 targeting pack cannot be restored offline here. -->
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net6.0</TargetFramework>
+    <AssemblyName>OcAI</AssemblyName>
+    <RootNamespace>OcAI</RootNamespace>
+    <Version>0.2.0</Version>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Set by Directory.Build.props (C# 9, the .NET 6 language version) so that
+         building against a newer reference set cannot quietly introduce newer
+         language features. -->
+    <LangVersion Condition="'$(LangVersion)' == ''">9</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <DebugType>none</DebugType>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <NoWarn>$(NoWarn);NETSDK1138;CS0436;CS1701;CS1702;CS0618</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup Label="BepInEx runtime API">
+    <Reference Include="BepInEx.Core">
+      <HintPath>$(BepCore)\BepInEx.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx.Unity.IL2CPP">
+      <HintPath>$(BepCore)\BepInEx.Unity.IL2CPP.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx.Unity.Common">
+      <HintPath>$(BepCore)\BepInEx.Unity.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(BepCore)\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Common">
+      <HintPath>$(BepCore)\Il2CppInterop.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(BepCore)\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Label="Game IL2CPP interop">
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(BepInterop)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(BepInterop)\Il2Cppmscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(BepInterop)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(BepInterop)\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(BepInterop)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(BepInterop)\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- Spine: the character is a Spine skeleton, and the bubble anchors on her
+         "head" bone (see BubbleUi.HeadTopWorld). Renderer bounds were tried first
+         and measured the wrong thing; the skeleton itself knows where the head is. -->
+    <Reference Include="spine-unity">
+      <HintPath>$(BepInterop)\spine-unity.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="spine-csharp">
+      <HintPath>$(BepInterop)\spine-csharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
