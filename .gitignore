@@ -1,0 +1,24 @@
+# 构建产物
+bin/
+obj/
+
+# 本地工具链（体积大，不入库）
+tools/dotnet/
+tools/nuget/
+tools/packsroot/
+tools/refpack/
+
+# 编译引用（含游戏 interop 程序集，受版权保护，不要提交）
+gamefiles/
+
+# 运行期产物
+*.log
+*.wav
+ocai_debug.txt
+
+# 编辑器 / 系统
+.vs/
+.idea/
+*.user
+Thumbs.db
+desktop.ini
