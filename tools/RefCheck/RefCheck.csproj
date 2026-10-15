@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    RefCheck: prints the assembly references of a plugin DLL and flags any type
+    reference that points at a well-known facade.
+
+    Built after the OcAI plugin compiled cleanly against the .NET 8 reference
+    assemblies and then refused to load in the game:
+
+      TypeLoadException: Could not load type
+      'System.Runtime.InteropServices.RuntimeInformation'
+      from assembly 'System.Runtime, Version=6.0.0.0'
+
+    With the 8.0 reference set the compiler binds RuntimeInformation to
+    System.Runtime; the .NET 6 runtime has no such type there (it lives in
+    System.Runtime.InteropServices.RuntimeInformation), so the chainloader
+    aborts. This tool makes that visible before shipping a build.
+
+    Mono.Cecil is referenced straight from the offline NuGet cache, so the tool
+    needs no network either.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>RefCheck</AssemblyName>
+    <RootNamespace>RefCheck</RootNamespace>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+    <CecilDir Condition="'$(CecilDir)' == ''">C:\Users\Lenovo\Desktop\ocdesktop-mod\tools\nuget\mono.cecil\0.11.4\lib\netstandard2.0</CecilDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Mono.Cecil">
+      <HintPath>$(CecilDir)\Mono.Cecil.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Mono.Cecil.Pdb">
+      <HintPath>$(CecilDir)\Mono.Cecil.Pdb.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Mono.Cecil.Mdb">
+      <HintPath>$(CecilDir)\Mono.Cecil.Mdb.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
