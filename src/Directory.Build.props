@@ -1,0 +1,47 @@
+<Project>
+
+  <!--
+    Offline build settings for everything under src\.
+
+    We compile against a REAL set of .NET 6 reference assemblies, unpacked from
+    the offline feed into ..\refpack:
+
+      localfeed\microsoft.netcore.app.ref.6.0.0.nupkg        -> ref/net6.0/*.dll
+      localfeed\microsoft.windowsdesktop.app.ref.6.0.0.nupkg
+      localfeed\microsoft.aspnetcore.app.ref.6.0.0.nupkg
+
+    The SDK cannot provide them itself here. It ships ONLY the 8.0 targeting
+    packs and hard-codes a request for Microsoft.NETCore.App.Ref 6.0.36, which
+    neither the local feed (6.0.0 only) nor nuget.org (no remote source is
+    configured, on purpose) can satisfy, so an ordinary net6.0 build dies with
+    NU1100 / NU1102.
+
+    WHY NOT JUST BUILD AGAINST THE 8.0 PACKS:
+    that was tried, and the plugin compiled fine but refused to load in the game:
+
+      System.TypeLoadException: Could not load type
+      'System.Runtime.InteropServices.RuntimeInformation'
+      from assembly 'System.Runtime, Version=6.0.0.0'
+
+    The 8.0 reference assemblies type-forward members into types that the .NET 6
+    runtime does not have, and the BepInEx chainloader aborts the whole plugin.
+
+    So: DisableImplicitFrameworkReferences turns off the SDK's framework
+    reference (and with it the impossible NuGet download), and the reference
+    assemblies are added explicitly from ..\refpack instead.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>9</LangVersion>
+    <DisableImplicitFrameworkReferences>true</DisableImplicitFrameworkReferences>
+    <RefPackDir Condition="'$(RefPackDir)' == ''">$(MSBuildThisFileDirectory)..\refpack</RefPackDir>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(RefPackDir)')">
+    <Reference Include="$(RefPackDir)\*.dll">
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
