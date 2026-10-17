@@ -429,6 +429,11 @@ namespace OcAI
         /// <summary>Our cloned rows, so we can recognise clicks on them.</summary>
         internal static UnityEngine.MonoBehaviour KeyRow;
         internal static UnityEngine.MonoBehaviour ToggleRow;
+        internal static UnityEngine.MonoBehaviour ChatRow;
+        internal static UnityEngine.MonoBehaviour ClearRow;
+        internal static UnityEngine.MonoBehaviour SitRow;
+        internal static UnityEngine.MonoBehaviour WebRow;
+        internal static UnityEngine.MonoBehaviour GuardRow;
         private static bool _rowsInjected;
 
         /// <summary>Label shown on the toggle row, reflecting the master switch.</summary>
@@ -438,13 +443,51 @@ namespace OcAI
             return on ? "AI 接入：开（点此关闭）" : "AI 接入：已关闭（点此开启）";
         }
 
+        /// <summary>Label for the chat row.</summary>
+        private static string ChatLabel()
+        {
+            bool on = Plugin.Cfg == null || Plugin.Cfg.EnableChat.Value;
+            return on ? "坐下按 F 聊天：开（点此关闭）" : "坐下按 F 聊天：已关闭（点此开启）";
+        }
+
+        /// <summary>Label for the memory row, including how much is remembered.</summary>
+        private static string ClearLabel()
+        {
+            int n = 0;
+            try { n = ChatFlow.HistoryCount / 2; } catch { }
+            return "清空对话记忆（已记 " + n + " 轮）";
+        }
+
+        /// <summary>Label for the sitting-requirement row.</summary>
+        private static string SitLabel()
+        {
+            bool on = Plugin.Cfg != null && Plugin.Cfg.RequireSitting.Value;
+            return on ? "聊天要求先坐下：是（点此关闭）" : "聊天要求先坐下：否（点此开启）";
+        }
+
+        /// <summary>Label for the web-search row.</summary>
+        private static string WebLabel()
+        {
+            bool on = Plugin.Cfg == null || Plugin.Cfg.EnableWebSearch.Value;
+            return on ? "联网搜索：开（点此关闭）" : "联网搜索：已关闭（点此开启）";
+        }
+
+        /// <summary>Label for the desktop display protection row.</summary>
+        private static string GuardLabel()
+        {
+            bool on = Plugin.Cfg == null || Plugin.Cfg.DisplayGuard.Value;
+            return on ? "保护桌面显示：开（点此关闭）" : "保护桌面显示：已关闭（点此开启）";
+        }
+
         /// <summary>
-        /// Adds two rows to the game's settings panel by cloning its own SizeSetting
-        /// row, so the entries inherit the panel's look, layout and animation instead
-        /// of being a bolted-on canvas:
+        /// Adds rows to the game's settings panel by cloning its own SizeSetting row, so
+        /// the entries inherit the panel's look, layout and animation instead of being a
+        /// bolted-on canvas:
         ///
-        ///   AI 接入：开 / 已关闭   -> master on/off switch
-        ///   DeepSeek Key           -> opens the key input modal
+        ///   AI 接入：开 / 已关闭              -> master on/off switch
+        ///   DeepSeek Key                      -> opens the key input modal
+        ///   坐下右键聊天：开 / 已关闭          -> right-click chat switch
+        ///   清空对话记忆（已记 N 轮）          -> wipes the remembered conversation
         ///
         /// Called from a postfix on SettingPanel.OnShow().
         /// </summary>
@@ -464,16 +507,27 @@ namespace OcAI
 
                 KeyRow = CloneRow(src, parent, "AI 接入 Key");
                 ToggleRow = CloneRow(src, parent, ToggleLabel());
+                ChatRow = CloneRow(src, parent, ChatLabel());
+                ClearRow = CloneRow(src, parent, ClearLabel());
+                SitRow = CloneRow(src, parent, SitLabel());
+                WebRow = CloneRow(src, parent, WebLabel());
+                GuardRow = CloneRow(src, parent, GuardLabel());
 
-                if (KeyRow == null && ToggleRow == null)
+                if (KeyRow == null && ToggleRow == null && ChatRow == null &&
+                    ClearRow == null && SitRow == null && WebRow == null && GuardRow == null)
                 {
-                    Plugin.Dbg("InjectSettingRow: both clones failed");
+                    Plugin.Dbg("InjectSettingRow: all clones failed");
                     return;
                 }
 
                 _rowsInjected = true;
                 Plugin.Info("[OcAI] injected settings rows (key=" + (KeyRow != null) +
-                            ", toggle=" + (ToggleRow != null) + ")");
+                            ", toggle=" + (ToggleRow != null) +
+                            ", chat=" + (ChatRow != null) +
+                            ", clear=" + (ClearRow != null) +
+                            ", sit=" + (SitRow != null) +
+                            ", web=" + (WebRow != null) +
+                            ", guard=" + (GuardRow != null) + ")");
             }
             catch (Exception e)
             {
@@ -612,6 +666,36 @@ namespace OcAI
             catch { }
         }
 
+        private static void RefreshChatLabel()
+        {
+            try { if (ChatRow != null) SetRowLabel(ChatRow, ChatLabel()); }
+            catch { }
+        }
+
+        private static void RefreshClearLabel()
+        {
+            try { if (ClearRow != null) SetRowLabel(ClearRow, ClearLabel()); }
+            catch { }
+        }
+
+        private static void RefreshSitLabel()
+        {
+            try { if (SitRow != null) SetRowLabel(SitRow, SitLabel()); }
+            catch { }
+        }
+
+        private static void RefreshWebLabel()
+        {
+            try { if (WebRow != null) SetRowLabel(WebRow, WebLabel()); }
+            catch { }
+        }
+
+        private static void RefreshGuardLabel()
+        {
+            try { if (GuardRow != null) SetRowLabel(GuardRow, GuardLabel()); }
+            catch { }
+        }
+
         /// <summary>
         /// Harmony prefix on SizeSetting.OnAddButtonClick / OnSubButtonClick.
         /// Returning false suppresses the original method, so clicking our rows does
@@ -624,7 +708,8 @@ namespace OcAI
         {
             try
             {
-                if (KeyRow == null && ToggleRow == null) return true;
+                if (KeyRow == null && ToggleRow == null && ChatRow == null &&
+                    ClearRow == null && SitRow == null && WebRow == null && GuardRow == null) return true;
 
                 var mb = ToMonoBehaviour(__instance);
                 if (mb == null) return true;
@@ -651,6 +736,94 @@ namespace OcAI
                     Plugin.Dbg("settings key row clicked -> open editor");
                     OpenApiKeyEditor();
                     Plugin.EnqueueSpeak("在这里输入 DeepSeek 的 API Key，然后点确定");
+                    return false;
+                }
+
+                // Right-click chat on/off.
+                if (ChatRow != null && mb == ChatRow)
+                {
+                    bool nowOn = !(Plugin.Cfg != null && Plugin.Cfg.EnableChat.Value);
+                    if (Plugin.Cfg != null)
+                    {
+                        Plugin.Cfg.EnableChat.Value = nowOn;
+                        try { Plugin.Cfg.EnableChat.ConfigFile.Save(); } catch { }
+                    }
+                    Plugin.Dbg("settings chat row -> enableChat=" + nowOn);
+                    Plugin.Info("[OcAI] right-click chat " + (nowOn ? "enabled" : "disabled"));
+                    RefreshChatLabel();
+
+                    Plugin.EnqueueSpeak(nowOn
+                        ? "坐下之后右键点我就行"
+                        : "好，那我不主动搭话了");
+                    return false;
+                }
+
+                // Wipe the remembered conversation. This is the "clear" the user asked
+                // for, available without typing a command.
+                if (ClearRow != null && mb == ClearRow)
+                {
+                    bool had = ChatFlow.ClearHistory();
+                    Plugin.Dbg("settings clear row -> cleared, had=" + had);
+                    RefreshClearLabel();
+                    Plugin.EnqueueSpeak(had ? "之前的都忘掉啦" : "我们还没聊过呢");
+                    return false;
+                }
+
+                // Strict "must be sitting" gate. Off by default: see RequireSitting in
+                // the config for why (the sit pose is not observable from the plugin).
+                if (SitRow != null && mb == SitRow)
+                {
+                    bool nowOn = !(Plugin.Cfg != null && Plugin.Cfg.RequireSitting.Value);
+                    if (Plugin.Cfg != null)
+                    {
+                        Plugin.Cfg.RequireSitting.Value = nowOn;
+                        try { Plugin.Cfg.RequireSitting.ConfigFile.Save(); } catch { }
+                    }
+                    Plugin.Dbg("settings sit row -> requireSitting=" + nowOn);
+                    Plugin.Info("[OcAI] chat requires sitting = " + nowOn);
+                    RefreshSitLabel();
+
+                    Plugin.EnqueueSpeak(nowOn
+                        ? "好，我坐下你才能找我聊"
+                        : "好，不坐下也能找我聊");
+                    return false;
+                }
+
+                // Web search on/off.
+                if (WebRow != null && mb == WebRow)
+                {
+                    bool nowOn = !(Plugin.Cfg != null && Plugin.Cfg.EnableWebSearch.Value);
+                    if (Plugin.Cfg != null)
+                    {
+                        Plugin.Cfg.EnableWebSearch.Value = nowOn;
+                        try { Plugin.Cfg.EnableWebSearch.ConfigFile.Save(); } catch { }
+                    }
+                    Plugin.Dbg("settings web row -> enableWebSearch=" + nowOn);
+                    Plugin.Info("[OcAI] web search " + (nowOn ? "enabled" : "disabled"));
+                    RefreshWebLabel();
+
+                    Plugin.EnqueueSpeak(nowOn
+                        ? "好，需要查资料的时候我自己去搜"
+                        : "好，我就用自己知道的回答");
+                    return false;
+                }
+
+                // Desktop display protection (prevents the icon rearrangement).
+                if (GuardRow != null && mb == GuardRow)
+                {
+                    bool nowOn = !(Plugin.Cfg != null && Plugin.Cfg.DisplayGuard.Value);
+                    if (Plugin.Cfg != null)
+                    {
+                        Plugin.Cfg.DisplayGuard.Value = nowOn;
+                        try { Plugin.Cfg.DisplayGuard.ConfigFile.Save(); } catch { }
+                    }
+                    Plugin.Dbg("settings guard row -> displayGuard=" + nowOn);
+                    Plugin.Info("[OcAI] desktop display protection = " + nowOn);
+                    RefreshGuardLabel();
+
+                    Plugin.EnqueueSpeak(nowOn
+                        ? "好，我会守住你桌面的分辨率"
+                        : "好，那游戏可以自己改显示设置了");
                     return false;
                 }
 
