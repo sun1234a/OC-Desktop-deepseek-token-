@@ -56,7 +56,9 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <DebugType>none</DebugType>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
-    <NoWarn>$(NoWarn);NETSDK1138;CS0436;CS1701;CS1702;CS0618</NoWarn>
+    <!-- CA1416: the registry calls in the display guard are Windows-only by design; this
+         plugin only ever loads into a Windows IL2CPP game. -->
+    <NoWarn>$(NoWarn);NETSDK1138;CS0436;CS1701;CS1702;CS0618;CA1416</NoWarn>
   </PropertyGroup>
 
   <ItemGroup Label="BepInEx runtime API">
