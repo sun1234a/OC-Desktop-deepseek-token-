@@ -37,6 +37,56 @@ namespace OcAI
         private static bool _lastLButton;
         private static DateTime _lastPat = DateTime.MinValue;
 
+        /// <summary>
+        /// Last time OnMouseOver proved the cursor was on her, and the component it came
+        /// from. The keyboard chat trigger (F6/F7) needs to know which character the
+        /// cursor is pointing at, and OnMouseOver is the only reliable source for that
+        /// (the collider wins over raycasts).
+        /// </summary>
+        private static DateTime _hoverAt = DateTime.MinValue;
+        private static UnityEngine.MonoBehaviour _hoverMb;
+
+        /// <summary>Seconds the hover memory stays valid without a fresh OnMouseOver.</summary>
+        private const double HoverValidSeconds = 0.4;
+
+        /// <summary>True when the cursor was on her within the last fraction of a second.</summary>
+        internal static bool IsHoveringRecently
+        {
+            get
+            {
+                return _hoverMb != null &&
+                       (DateTime.UtcNow - _hoverAt).TotalSeconds <= HoverValidSeconds;
+            }
+        }
+
+        /// <summary>
+        /// Hover resolved from the OS cursor position instead of Unity's OnMouseOver.
+        /// Used as a second chance when the key press lands in a frame where Unity did
+        /// not dispatch OnMouseOver (or when the game swallowed the hover).
+        /// </summary>
+        internal static bool IsCursorOverCharacterByGeometry()
+        {
+            try
+            {
+                var bongo = Plugin.ResolveBongo();
+                if (bongo == null) return false;
+                if (!IsCursorOnHead(bongo.transform)) return false;
+
+                // A geometry hit also refreshes the hover memory, so the bubble anchor
+                // is up to date for the answer.
+                _hoverMb = bongo;
+                _hoverAt = DateTime.UtcNow;
+                Plugin.RegisterPump(bongo);
+                Plugin.SetSpeakAnchor(bongo);
+                return true;
+            }
+            catch (Exception e)
+            {
+                Plugin.Dbg("IsCursorOverCharacterByGeometry: " + e.Message);
+                return false;
+            }
+        }
+
         /// <summary>Screen-space test: is the cursor inside the character's head band?</summary>
         private static bool IsCursorOnHead(UnityEngine.Transform tr)
         {
@@ -106,36 +156,58 @@ namespace OcAI
         {
             try
             {
-                if (Plugin.Cfg == null || !Plugin.Cfg.EnableHeadPatBalance.Value) return;
+                if (Plugin.Cfg == null) return;
 
-                // Hovering is not patting: require a fresh left-button press edge.
-                bool lbtn = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-                bool pressed = lbtn && !_lastLButton;
-                _lastLButton = lbtn;
-                if (!pressed) return;
-
-                // De-bounce: one pat per 1.2 s even if the postfix runs many times.
-                if ((DateTime.UtcNow - _lastPat).TotalMilliseconds < 1200) return;
-
-                UnityEngine.Transform tr = null;
+                // The pump / speak anchor must be captured even when the balance
+                // feature is off: the right-click chat needs them too.
                 var mb = __instance as UnityEngine.MonoBehaviour;
+                UnityEngine.Transform tr = null;
                 if (mb != null)
                 {
                     tr = mb.transform;
                     Plugin.RegisterPump(mb);      // live game MonoBehaviour -> coroutine pump
                     Plugin.SetSpeakAnchor(mb);    // bubbles pop above the character
+
+                    // Remember the hover: the keyboard chat trigger asks "is the cursor
+                    // on her", and this is the game's own answer to that question.
+                    _hoverMb = mb;
+                    _hoverAt = DateTime.UtcNow;
                 }
 
-                // Remember where the click landed, as a bubble-position fallback.
+                // Remember where the cursor is, as a bubble-position fallback.
                 POINT cp;
                 if (GetCursorPos(out cp))
                     Plugin.SetSpeakScreenPos(cp.X, UnityEngine.Screen.height - cp.Y);
 
-                if (!IsCursorOnHead(tr)) return;
+                // The left button is read every call so that the state really tracks the
+                // physical button even when the cursor left the character in between.
+                //
+                // One physical click is routed by Plugin.PatRouter: a double click means
+                // "talk to her", a single click keeps the original balance bubble. The
+                // game's own bindings do not use left-double-click, so nothing fights us
+                // for it (unlike the right button, which stands her up).
+                bool lbtn = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                bool leftEdge = lbtn && !_lastLButton;
+                _lastLButton = lbtn;
 
+                if (!leftEdge) return;
+
+                // A click anywhere on her counts; IsCursorOnHead is kept only as a
+                // sanity band, matching the pre-chat behaviour.
+                if (!IsCursorOnHead(tr))
+                {
+                    Plugin.Dbg("left click ignored: cursor outside her clickable band");
+                    return;
+                }
+
+                if ((DateTime.UtcNow - _lastPat).TotalMilliseconds < 120)
+                {
+                    Plugin.Dbg("left click ignored: within debounce window");
+                    return;   // ignore contact bounce / duplicated edges
+                }
                 _lastPat = DateTime.UtcNow;
-                Plugin.Dbg("HEAD PAT detected -> requesting balance");
-                Plugin.OnHeadPat();
+
+                Plugin.PatRouter();
             }
             catch (Exception e)
             {
