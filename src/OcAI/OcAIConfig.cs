@@ -31,6 +31,20 @@ namespace OcAI
         public ConfigEntry<float> BubbleStandOffsetX;
         public ConfigEntry<float> SizeScale;
 
+        // --- right-click AI chat ---
+        public ConfigEntry<bool> EnableChat;
+        public ConfigEntry<string> ChatInputTips;
+        public ConfigEntry<int> ChatMaxTokens;
+        public ConfigEntry<bool> ChatSplitLongReplies;
+        public ConfigEntry<bool> SitFailOpen;
+        public ConfigEntry<bool> RequireSitting;
+        public ConfigEntry<float> InputOffsetY;
+        public ConfigEntry<float> InputOffsetX;
+        public ConfigEntry<bool> EnableWebSearch;
+        public ConfigEntry<bool> SearchAlways;
+        public ConfigEntry<bool> WebSearchSelfTest;
+        public ConfigEntry<bool> DisplayGuard;
+
         public static OcAIConfig Bind(ConfigFile cfg)
         {
             var c = new OcAIConfig();
@@ -48,8 +62,10 @@ namespace OcAI
                 "Model name, e.g. deepseek-chat or deepseek-reasoner.");
 
             c.Temperature = cfg.Bind(
-                "DeepSeek", "Temperature", 1.1f,
-                "Sampling temperature for the character's replies.");
+                "DeepSeek", "Temperature", 0.8f,
+                "Sampling temperature for the character's replies. 0.8 keeps her in " +
+                "character without wandering off the question; 1.1 was tried and produced " +
+                "answers that did not address what was asked.");
 
             c.MaxTokens = cfg.Bind(
                 "DeepSeek", "MaxTokens", 160,
@@ -78,9 +94,11 @@ namespace OcAI
                 "Write detailed diagnostics to BepInEx\\plugins\\ocai_debug.txt.");
 
             c.EditKeyHotkey = cfg.Bind(
-                "UI", "EditKeyHotkey", "MiddleMouse",
-                "How to open the API key editor. One of: MiddleMouse, ScrollLock, Insert, " +
-                "Pause, F8, None. Deliberately avoids F9: on many laptops F9 is the " +
+                "UI", "EditKeyHotkey", "None",
+                "How to open the API key editor from the keyboard. One of: MiddleMouse, " +
+                "ScrollLock, Insert, Pause, F8, None. Default None: middle mouse is now " +
+                "the chat trigger, and the settings panel already carries an " +
+                "'AI 接入 Key' row. Deliberately avoids F9: on many laptops F9 is the " +
                 "screen-lock / airplane-mode key and never reaches the game.");
             c.BubbleSelfTest = cfg.Bind(
                 "Debug", "BubbleSelfTest", true,
@@ -134,6 +152,96 @@ namespace OcAI
                 "0 = auto (recommended): the plugin watches her world-space height and " +
                 "scales automatically, so 1x / 1.5x / 2x all keep the same visual gap. " +
                 "Set a positive number to override, e.g. 1.5 when using the 1.5x body.");
+
+            // ------------------------------------------------------------- chat
+            c.EnableChat = cfg.Bind(
+                "Chat", "EnableChat", true,
+                "While she is SITTING, put the cursor on her and press the F key to open " +
+                "the game's input modal and talk to DeepSeek. Her answer appears in the " +
+                "speech bubble. Type /clear in the same box to wipe the remembered " +
+                "conversation. F6/F7 are deliberately not used: on many laptops they are " +
+                "system keys and never reach the game.");
+
+            c.ChatInputTips = cfg.Bind(
+                "Chat", "InputTips", "想和我说什么？",
+                "Placeholder text shown in the chat input modal.");
+
+            c.InputOffsetY = cfg.Bind(
+                "Chat", "InputOffsetY", 1080f,
+                "Distance of the chat input box from the BOTTOM edge of the screen, in " +
+                "pixels. Bigger = higher up. NOTE: this window presents its content with the " +
+                "vertical axis inverted relative to the panel layer, so the value is mirrored " +
+                "internally (measured: panel layer y=272 was drawn near the TOP while Unity " +
+                "called it BOTTOM-RIGHT). 1080 lands the box in the bottom-right corner on a " +
+                "1080-tall screen while still clearing the taskbar; confirmed in game.");
+
+            c.InputOffsetX = cfg.Bind(
+                "Chat", "InputOffsetX", 460f,
+                "Distance of the chat input box from the RIGHT edge of the screen, in " +
+                "pixels. Bigger = further left. 460 keeps the confirm button clear of the " +
+                "window edge (at 300 it was clipped).");
+
+            c.ChatMaxTokens = cfg.Bind(
+                "Chat", "MaxTokens", 400,
+                "Max tokens per chat answer. Bigger allows longer replies, but the bubble " +
+                "is small: two or three sentences read best.");
+
+            c.ChatSplitLongReplies = cfg.Bind(
+                "Chat", "SplitLongReplies", true,
+                "Split a long answer at sentence enders and show the parts one after " +
+                "another, instead of shrinking one huge bubble to fit.");
+
+            c.SitFailOpen = cfg.Bind(
+                "Chat", "TreatUnknownPoseAsSitting", true,
+                "If her pose / state machine cannot be read at all, still allow the " +
+                "chat key. Keeps the feature usable if a game update renames " +
+                "the sitting state; set false to demand positive proof of sitting.");
+
+            c.RequireSitting = cfg.Bind(
+                "Chat", "RequireSitting", true,
+                "Require the desk pose before the F key opens the chat. Default ON, and it " +
+                "works by hooking OcSittingState.OnEnter/OnExit (the game's own sitting " +
+                "state), because neither the Spine clip name nor the state machine's " +
+                "current state is usable: measured live, the clip stays 'new/standing-e' " +
+                "while she sits, GetCurrentStateType() answers the literal string " +
+                "'Il2CppSystem.Type', and GetCurrentState() comes back as the declared " +
+                "IState wrapper. If the hooks fail to install, the gate falls back to the " +
+                "clip/pose checks and TreatUnknownPoseAsSitting decides the unknown case. " +
+                "Set false to let the F key work wherever she is.");
+
+            // ------------------------------------------------------------- web search
+            c.EnableWebSearch = cfg.Bind(
+                "Search", "EnableWebSearch", true,
+                "Let the chat look things up online. Your question is sent to a search " +
+                "engine, the top hits are pasted into the prompt as context, and DeepSeek " +
+                "answers from them. The DeepSeek chat API itself has no browsing, so this " +
+                "is the plugin doing the search. Set false to stay fully offline.");
+
+            c.SearchAlways = cfg.Bind(
+                "Search", "SearchAlways", false,
+                "false (default): only search when the question looks time-sensitive " +
+                "(contains 最新/今天/现在/新闻/股价/天气/搜一下 ...). true: search before " +
+                "every message -- more accurate for factual questions, but every chat then " +
+                "waits for a search round trip.");
+
+            c.WebSearchSelfTest = cfg.Bind(
+                "Debug", "WebSearchSelfTest", true,
+                "Once, a few seconds after launch, run a real web search from inside the " +
+                "game and write the outcome (engine reached, hits found, model answer) to " +
+                "ocai_debug.txt. Makes the 联网 path verifiable with no typing. Set false " +
+                "to keep the plugin from touching the network on startup.");
+
+            // ------------------------------------------------------------- display guard
+            c.DisplayGuard = cfg.Bind(
+                "Display", "ProtectDesktopDisplay", true,
+                "Stop this game from permanently changing the desktop display mode. The game " +
+                "has its own window manager (WindowDisplaySync.ApplyResolution / " +
+                "DisplayManager.MoveToDisplay / SwitchWindowedAndSync) which can rewrite the " +
+                "resolution and the desktop DPI value; Windows then REARRANGES THE DESKTOP " +
+                "ICONS, which is the damage this prevents. With the guard on, the plugin " +
+                "records the resolution that was in use when it loaded and restores it if the " +
+                "game changes it. Set false if the game ever needs to switch modes on purpose " +
+                "(e.g. moving to another monitor).");
 
             return c;
         }
