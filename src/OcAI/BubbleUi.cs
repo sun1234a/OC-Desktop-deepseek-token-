@@ -28,6 +28,16 @@ namespace OcAI
         private const float ShowSeconds = 8f;
 
         /// <summary>
+        /// Duration for the NEXT bubble only, set by the pump per line: an AI answer
+        /// needs longer on screen than the pet's own one-liners. Left at 0 (meaning
+        /// "use the default") between lines.
+        /// </summary>
+        internal static float NextShowSeconds;
+
+        /// <summary>How long the bubble currently on screen was given.</summary>
+        private static float _showSeconds = ShowSeconds;
+
+        /// <summary>
         /// Screen position for the bubble: the game's own idea of where the
         /// character's head is.
         ///
@@ -218,7 +228,7 @@ namespace OcAI
             if (_bubble == null || _hidden) return;
             try
             {
-                if ((DateTime.UtcNow - _shownAt).TotalSeconds > ShowSeconds)
+                if ((DateTime.UtcNow - _shownAt).TotalSeconds > _showSeconds)
                 {
                     _bubble.SetActive(false);
                     _hidden = true;
@@ -759,9 +769,13 @@ namespace OcAI
                     catch (Exception e) { Plugin.Dbg("BubbleUi PLACED: " + e.Message); }
                 }
 
-                if (!verbose &&
-                    (DateTime.UtcNow - _lastAnchorLog).TotalSeconds < 2.0 &&
-                    Mathf.Abs(placed.y - _lastLoggedY) < 4f) return;
+                // Throttle the per-frame follow log in BOTH modes. It used to print every
+                // frame while a bubble was visible (8-40 s per line), which grew the debug
+                // file by megabytes for no extra information: the same numbers were being
+                // repeated. verbose (a fresh line) still logs immediately.
+                double sinceLog = (DateTime.UtcNow - _lastAnchorLog).TotalSeconds;
+                if (sinceLog < 2.0 && Mathf.Abs(placed.y - _lastLoggedY) < 4f) return;
+                if (!verbose && sinceLog < 0.5) return;
 
                 _lastAnchorLog = DateTime.UtcNow;
                 _lastLoggedY = placed.y;
@@ -801,7 +815,9 @@ namespace OcAI
                 catch (Exception e) { Plugin.Dbg("BubbleUi PlayShowAnim: " + e.Message); }
 
                 _shownAt = DateTime.UtcNow;
-                Plugin.Dbg("BubbleUi.Show at " + uiPos + ": " + text);
+                _showSeconds = NextShowSeconds > 0.1f ? NextShowSeconds : ShowSeconds;
+                NextShowSeconds = 0f;
+                Plugin.Dbg("BubbleUi.Show (" + _showSeconds.ToString("F1") + "s) at " + uiPos + ": " + text);
                 return true;
             }
             catch (Exception e)
@@ -872,6 +888,11 @@ namespace OcAI
                 _bubbleTyped = typed;
                 _bubbleMb = typed;                  // DialogueBubble is a MonoBehaviour
                 _bubble = typed.gameObject;
+
+                // Our clone shares the prefab with the game's own bubbles, so it has to
+                // be excluded from the dialogue harvester by identity -- otherwise the
+                // plugin's replies would be filed as things the game character said.
+                GameContext.IgnoreBubble(typed);
                 if (mb2 == null) Plugin.Dbg("BubbleUi: note - no plain MonoBehaviour on clone");
 
                 // The clone inherits the prefab's Button; remove the click handler so
@@ -998,21 +1019,35 @@ namespace OcAI
             if (halfW < 1f) halfW = _lastPanelW * 0.5f;
             if (halfH < 1f) halfH = _lastPanelH * 0.5f;
 
-            // The tail hangs below the panel, so the panel may sit a little lower
-            // than its own half-height would suggest.
-            const float edge = 8f;
+            // Room to leave at each screen edge.
+            //
+            // Reported bug: "气泡的头已经到外面去了" -- the bubble's own tail (Point1_Img /
+            // Point2_Img hang BELOW the panel) plus a mere 8 px of air was not enough, so
+            // the top of the bubble could be pushed past the window edge even though the
+            // panel's centre was clamped. The top therefore reserves the tail height as
+            // well; sides and bottom keep a small margin.
+            const float edge = 12f;
+            const float tailHeight = 45f;
 
             float w = UnityEngine.Screen.width;
             float h = UnityEngine.Screen.height;
             if (w <= 0f || h <= 0f) return new Vector2(wantX, wantY);
 
-            // If the window is narrower / shorter than the bubble itself there is no
-            // valid clamp; centre it in that axis rather than fighting the maths.
+            // Bubble wider than the space available: there is no position that shows
+            // all of it, so keep as much as possible instead of centring it. Centring
+            // was the bug behind "角色挂右边会出错": with her at x=1897 the bubble
+            // jumped to the middle of the screen, nowhere near her.
             float minX = halfW + edge, maxX = w - halfW - edge;
-            float x = (minX <= maxX) ? Mathf.Clamp(wantX, minX, maxX) : w * 0.5f;
+            float x;
+            if (minX <= maxX)
+                x = Mathf.Clamp(wantX, minX, maxX);
+            else
+                x = Mathf.Min(wantX, Mathf.Max(halfW * 0.5f, w * 0.5f));
 
-            // Top of the window is ui y = 0; leave `edge` pixels of air there.
-            float minY = halfH + edge, maxY = h - halfH - edge;
+            // Top of the window is ui y = 0. The panel's centre must stay at least
+            // half its height PLUS the tail away from the top, or the bubble is clipped.
+            float minY = halfH + tailHeight;
+            float maxY = h - halfH - edge;
             float y = (minY <= maxY) ? Mathf.Clamp(wantY, minY, maxY) : minY;
 
             return new Vector2(x, y);
