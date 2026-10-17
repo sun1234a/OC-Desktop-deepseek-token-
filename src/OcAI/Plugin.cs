@@ -65,6 +65,7 @@ namespace OcAI
         internal static void SetSpeakAnchor(UnityEngine.MonoBehaviour mb)
         {
             if (mb == null) return;
+            if (SpeakAnchorMb == mb) return;      // hover fires every frame; do not re-log
             SpeakAnchorMb = mb;
             _bongoCache = null;      // new anchor: the old cached component may be gone
             Dbg("speak anchor set to " + mb.name + " (" + mb.GetType().Name + ")");
@@ -157,10 +158,179 @@ namespace OcAI
         private static DateTime _cachedBalanceAt = DateTime.MinValue;
         private static bool _balanceInFlight;
 
-        // conversation memory for the AI chat path
-        private static readonly List<Dictionary<string, string>> _history = new List<Dictionary<string, string>>();
-        private static readonly object _histLock = new object();
+        // Chat memory now lives entirely in ChatFlow. The old _history list is gone on
+        // purpose: it mixed the GAME's own dialogue into the model's context as if the
+        // model had said it, which made replies drift off topic.
 
+        // ------------------------------------------------------- display guard (desktop)
+        //
+        // WHY THIS EXISTS
+        // The game ships its own window manager -- WindowDisplaySync.ApplyResolution(int,int),
+        // WindowDisplaySync.SyncToSize(), DisplayManager.MoveToDisplay / SwitchDisplayAndSync
+        // / SwitchWindowedAndSync, plus TransparentWindowNew's click-through handling. It
+        // rewrites the display mode (measured live: the desktop DPI value was found set to
+        // 288 = 300% while the effective DPI was still 96, and the reported desktop bounds
+        // had become 1536x864). When the mode changes, WINDOWS REARRANGES THE DESKTOP ICONS
+        // -- that is the damage the user kept seeing.
+        //
+        // The plugin does not fight the game (blocking its own calls would break its
+        // rendering). Instead it remembers the mode that was in use when the plugin loaded
+        // and puts it back if the game changes it, so the damage is repaired within a
+        // moment instead of persisting after the game exits.
+
+        private static int _guardW, _guardH;
+        private static int _guardLogPixels;
+        private static bool _guardCaptured;
+        private static DateTime _guardLastRestore = DateTime.MinValue;
+        private static int _guardRestores;
+
+        // ------------------------------------------------------- real system display mode
+        //
+        // Screen.width is NOT enough: the game's own canvas keeps rendering at 1920x1080
+        // while the SYSTEM display mode is what changes (measured: EnumDisplaySettings
+        // reported 1920x1080 with dmLogPixels=120 = 125%, and .NET then saw a 1536x864
+        // desktop because 1920/1.25 = 1536). Windows rearranges the desktop icons when that
+        // logical size changes. So the guard reads the real mode through Win32.
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct DEVMODE
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+            public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra;
+            public int dmFields;
+            public int dmPositionX, dmPositionY;
+            public int dmDisplayOrientation, dmDisplayFixedOutput;
+            public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+            public short dmLogPixels;
+            public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+            public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType;
+            public int dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
+
+        /// <summary>Reads the live system display mode: resolution + LogPixels (scaling).</summary>
+        private static bool ReadSystemMode(out int w, out int h, out int logPixels)
+        {
+            w = h = logPixels = 0;
+            try
+            {
+                var dm = new DEVMODE();
+                dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+                if (!EnumDisplaySettings(null, -1, ref dm)) return false;
+                w = dm.dmPelsWidth;
+                h = dm.dmPelsHeight;
+                logPixels = dm.dmLogPixels;
+                return w > 0 && h > 0;
+            }
+            catch (Exception e)
+            {
+                Dbg("ReadSystemMode: " + e.GetType().Name + ": " + e.Message);
+                return false;
+            }
+        }
+
+        /// <summary>Records the desktop mode to protect. Called once from Load().</summary>
+        internal static void CaptureDisplayMode()
+        {
+            int w, h, lp;
+            if (ReadSystemMode(out w, out h, out lp))
+            {
+                _guardW = w; _guardH = h; _guardLogPixels = lp;
+                _guardCaptured = true;
+                Info("[OcAI] display guard: baseline system mode " + w + "x" + h +
+                     " logPixels=" + lp + " (" + (lp / 96.0 * 100.0).ToString("F0") + "% scaling)");
+            }
+            else
+            {
+                // Fall back to Unity's view rather than not guarding at all.
+                try
+                {
+                    _guardW = UnityEngine.Screen.width;
+                    _guardH = UnityEngine.Screen.height;
+                    _guardLogPixels = 0;
+                    _guardCaptured = _guardW > 0 && _guardH > 0;
+                    Info("[OcAI] display guard: baseline (unity fallback) " + _guardW + "x" + _guardH);
+                }
+                catch (Exception e)
+                {
+                    _guardCaptured = false;
+                    Dbg("CaptureDisplayMode: " + e.GetType().Name + ": " + e.Message);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Checks the REAL system mode and warns if the game changed it. Called from the
+        /// pump every second; a 2 s cooldown stops a fight with the game if it insists.
+        /// </summary>
+        internal static void GuardDisplayMode()
+        {
+            if (!_guardCaptured) return;
+            if (Cfg == null || !Cfg.DisplayGuard.Value) return;
+
+            try
+            {
+                int w, h, lp;
+                if (!ReadSystemMode(out w, out h, out lp)) return;
+
+                bool modeChanged = (w != _guardW || h != _guardH);
+                bool dpiChanged = (_guardLogPixels != 0 && lp != _guardLogPixels);
+                if (!modeChanged && !dpiChanged) return;
+
+                if ((DateTime.UtcNow - _guardLastRestore).TotalSeconds < 2.0) return;
+                _guardLastRestore = DateTime.UtcNow;
+                _guardRestores++;
+
+                Warn("[OcAI] display guard: the game changed the system display mode -> " +
+                     w + "x" + h + " logPixels=" + lp + " (baseline " + _guardW + "x" + _guardH +
+                     " logPixels=" + _guardLogPixels + "). This is what rearranges the desktop " +
+                     "icons; the baseline is re-applied in the registry and takes full effect " +
+                     "after signing out.");
+
+                if (dpiChanged)
+                {
+                    // The scaling lives in HKCU; writing it back is the supported way to undo
+                    // the change. It is applied by Windows at the next sign-in (a logoff is
+                    // required -- an explorer restart deliberately re-reads it as-is).
+                    try
+                    {
+                        using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                                   @"Control Panel\Desktop", true))
+                        {
+                            if (k != null)
+                            {
+                                k.SetValue("LogPixels", _guardLogPixels, Microsoft.Win32.RegistryValueKind.DWord);
+                                Dbg("display guard: restored HKCU LogPixels=" + _guardLogPixels);
+                            }
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Dbg("display guard HKCU write: " + e.GetType().Name + ": " + e.Message);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Dbg("GuardDisplayMode: " + e.GetType().Name + ": " + e.Message);
+            }
+        }
+
+        /// <summary>Diagnostic line for the log: what the guard is protecting.</summary>
+        internal static string DisplayGuardState()
+        {
+            int w, h, lp;
+            bool ok = ReadSystemMode(out w, out h, out lp);
+            return "display guard: on=" + (Cfg != null && Cfg.DisplayGuard.Value) +
+                   " baseline=" + _guardW + "x" + _guardH + " logPixels=" + _guardLogPixels +
+                   " current=" + (ok ? w + "x" + h + " logPixels=" + lp : "<unreadable>") +
+                   " restores=" + _guardRestores;
+        }
+
+        /// <summary>Master switch, exposed in the game's settings panel.</summary>
         internal static bool HeadPatEnabled
         {
             get { return Cfg != null && Cfg.EnableHeadPatBalance.Value; }
@@ -226,10 +396,18 @@ namespace OcAI
             Cfg = OcAIConfig.Bind(Config);
             Api = new DeepSeekClient(() => Cfg);
 
+            // Let the sitting gate follow the config: with the guard off, an unreadable
+            // pose counts as "not sitting".
+            try { SitState.FailOpen = Cfg.SitFailOpen.Value; } catch { }
+
             Dbg("config: baseUrl=" + Cfg.BaseUrl.Value + " model=" + Cfg.Model.Value +
                 " hasKey=" + Cfg.HasKey + " headPat=" + Cfg.EnableHeadPatBalance.Value);
 
             ApplyPatches();
+
+            // Remember the desktop display mode BEFORE the game's own window manager gets a
+            // chance to rewrite it; the guard restores it if that happens.
+            CaptureDisplayMode();
 
             Info("[OcAI] loaded. key configured = " + Cfg.HasKey);
             if (!Cfg.HasKey)
@@ -238,6 +416,21 @@ namespace OcAI
         }
 
         // ------------------------------------------------------------- patching
+
+        private static System.Reflection.Assembly _gameAsm;
+
+        /// <summary>Looks up a type in the game's own IL2CPP interop assembly.</summary>
+        internal static Type GameType(string fullName)
+        {
+            try
+            {
+                if (_gameAsm == null)
+                    _gameAsm = AppDomain.CurrentDomain.GetAssemblies()
+                        .FirstOrDefault(a => a.GetName().Name == "Assembly-CSharp");
+                return _gameAsm != null ? _gameAsm.GetType(fullName) : null;
+            }
+            catch { return null; }
+        }
 
         private static void ApplyPatches()
         {
@@ -254,6 +447,7 @@ namespace OcAI
                     Err("[OcAI] Assembly-CSharp interop not found. Is BepInEx\\interop generated?");
                     return;
                 }
+                _gameAsm = asmCSharp;
 
                 var touchTrigger = asmCSharp.GetType("OcTouchTrigger");
                 if (touchTrigger != null)
@@ -315,6 +509,12 @@ namespace OcAI
 
                 // ---- settings UI: reuse the game's own text input modal --------
                 SettingsUi.Locate(asmCSharp);
+
+                // ---- sitting state hooks : the authoritative "is she sitting" -----
+                // OcSittingState.OnEnter/OnExit are patched so the chat gate does not
+                // have to infer the pose (the animation name does not change when she
+                // sits, and the state machine's current state is not readable).
+                SitState.Attach(asmCSharp);
                 BubbleUi.Init(asmCSharp.GetType("UI.DialogueBubble"),
                               asmCSharp.GetType("UI.TopicImaginationInputWidget"));
                 var inputWidget = asmCSharp.GetType("UI.TopicImaginationInputWidget");
@@ -408,6 +608,48 @@ namespace OcAI
                 Dbg("ApplyPatches failed: " + e);
                 Err("[OcAI] patching failed: " + e.Message);
             }
+        }
+
+        // ------------------------------------------------------- click routing
+        //
+        // The click stays exactly as it always was: one left click on her pops the
+        // balance bubble, immediately, with no delay. Chat deliberately does NOT share
+        // the mouse anymore -- the game owns the right button (it stands her up) and the
+        // left button already means "balance", so chat is on a key instead (F6/F7, see
+        // PollChatHotkey).
+
+        private static DateTime _lastPatAt = DateTime.MinValue;
+
+        /// <summary>Called by the touch patch on a real left-button press on her.</summary>
+        internal static void PatRouter()
+        {
+            if (!PluginEnabled) return;
+
+            if ((DateTime.UtcNow - _lastPatAt).TotalMilliseconds < 300.0) return;
+            _lastPatAt = DateTime.UtcNow;
+
+            if (Cfg == null || !Cfg.EnableHeadPatBalance.Value)
+            {
+                Dbg("left click ignored: balance on click is disabled");
+                return;
+            }
+
+            Dbg("left click -> balance");
+            OnHeadPat();
+        }
+
+        /// <summary>Kept for callers that only need the old deferred behaviour.</summary>
+        internal static void MainThreadTick()
+        {
+        }
+
+        /// <summary>
+        /// Legacy entry point (was the double-click gesture). Now equivalent to pressing
+        /// the chat key, and only used if something still calls it.
+        /// </summary>
+        internal static void OnChatClick()
+        {
+            OnChatKey();
         }
 
         /// <summary>Called when the player clicks the character.</summary>
@@ -506,24 +748,30 @@ namespace OcAI
         {
             if (string.IsNullOrEmpty(line)) return;
             lock (_speakLock) { _speak.Enqueue(line); }
+
+            // Mark it as ours: these lines reach the game's dialogue widget too, and
+            // the widget patch would otherwise file the plugin's own words as things
+            // the game character said.
+            GameContext.NoteOwnLine(line);
+
             Dbg("queued speech: " + line);
         }
 
-        /// <summary>Record what the game made the character say (for context).</summary>
+        /// <summary>
+        /// The game made the character say something.
+        ///
+        /// Deliberately NOT recorded into the chat history any more. It used to be pushed
+        /// as an "assistant" message, but the chat request only sends the user's own
+        /// lines plus the model's replies -- so a game line (a topic reaction, a story
+        /// beat, a greeting to nobody) made the model believe IT had said that, and
+        /// answers drifted off topic. The conversation now contains only what the player
+        /// actually typed and what the model actually answered.
+        /// </summary>
         internal static void NoteGameUtterance(string text)
         {
             if (string.IsNullOrEmpty(text)) return;
-            lock (_histLock)
-            {
-                _history.Add(new Dictionary<string, string> { { "role", "assistant" }, { "content", text } });
-                TrimHistory();
-            }
-        }
-
-        private static void TrimHistory()
-        {
-            int max = Math.Max(0, (Cfg != null ? Cfg.HistoryTurns.Value : 6) * 2);
-            while (_history.Count > max) _history.RemoveAt(0);
+            Dbg("game utterance: " + text);
+            GameContext.NoteUtterance(text);
         }
 
         internal static void RegisterPump(UnityEngine.MonoBehaviour mb)
@@ -566,13 +814,56 @@ namespace OcAI
                 {
                     if (_speak.Count > 0) line = _speak.Dequeue();
                 }
-                if (line != null) ShowBubble(line);
+                if (line != null) ShowBubble(line, BubbleSecondsFor(line));
+                try { ChatFlow.MeasureInputBox(); } catch { }
+                try { ChatFlow.ApplyInputPosition(); } catch { }
+                try { MainThreadTick(); } catch (Exception e) { Dbg("MainThreadTick: " + e.Message); }
                 try { BubbleUi.Tick(); } catch { }
+                try { PollChatHotkey(); } catch (Exception e) { Dbg("PollChatHotkey: " + e.Message); }
                 try { PollHotkeys(); } catch (Exception e) { Dbg("PollHotkeys: " + e.Message); }
 
                 // once, a few seconds in (after the game has built its UI):
                 _pumpTicks++;
                 if (_pumpTicks == 250) { try { DumpLiveUiOnce(); } catch { } }
+
+                // Harvest the lines she is showing in the game's own bubbles. Every 20
+                // frames is plenty: these are lines that stay on screen for seconds.
+                if (_pumpTicks % 20 == 0) { try { GameContext.PollBubbles(); } catch { } }
+
+                // Protect the desktop display mode (see CaptureDisplayMode). Once a second
+                // is enough: the game only changes modes on its own window events.
+                if (_pumpTicks % 50 == 0)
+                {
+                    try { GuardDisplayMode(); } catch (Exception e) { Dbg("GuardDisplayMode: " + e.Message); }
+                }
+
+                // One-shot sitting-state dump, a few seconds in. This is the evidence
+                // that tells us what the state machine really reports, without needing
+                // anyone to press F7 first.
+                if (_pumpTicks == 400 && Cfg != null && Cfg.VerboseLogging.Value)
+                {
+                    try { Dbg("=== startup " + SitState.Describe() + " ==="); }
+                    catch (Exception e) { Dbg("startup sit probe failed: " + e.Message); }
+                    try { Dbg("=== startup " + DisplayGuardState() + " ==="); }
+                    catch (Exception e) { Dbg("startup display guard probe failed: " + e.Message); }
+                }
+
+                // Chat-memory lifecycle self-test, once, after the game UI is up. Verifies
+                // remember / count / clear / rebuild without needing a keypress.
+                if (_pumpTicks == 320)
+                {
+                    try { ChatFlow.SelfTest(); }
+                    catch (Exception e) { Dbg("ChatFlow.SelfTest: " + e.Message); }
+                }
+
+                // One-shot web-search probe: proves the search path (DNS, TLS, HTML
+                // parsing, provider fallback) works from inside the game process, with no
+                // user interaction. Off by default; turn on while diagnosing 联网.
+                if (_pumpTicks == 520 && Cfg != null && Cfg.WebSearchSelfTest.Value)
+                {
+                    try { ChatFlow.WebSelfTest(); }
+                    catch (Exception e) { Dbg("ChatFlow.WebSelfTest: " + e.Message); }
+                }
 
                 // Bubble self-test: proves the display path works with no head-pat
                 // and no valid API key needed.
@@ -591,16 +882,105 @@ namespace OcAI
         [DllImport("user32.dll")]
         private static extern short GetAsyncKeyState(int vKey);
 
-        // Virtual key codes. NOTE: F9/F10 are deliberately absent -- on many
-        // laptops F9 is the screen-lock / airplane-mode key and never reaches us,
-        // and F10 is often a system/brightness key.
+        // Virtual key codes. F6/F7 are deliberately NOT used any more: on many laptops
+        // those are system keys (brightness / media) and never reach the game, which is
+        // exactly what happened in testing. The chat trigger is the plain F key.
         private const int VK_MBUTTON = 0x04;
         private const int VK_SCROLL = 0x91;
         private const int VK_INSERT = 0x2D;
         private const int VK_PAUSE = 0x13;
+        private const int VK_F = 0x46;
         private const int VK_F8 = 0x77;
 
         private static bool _hotkeyDown;
+        private static bool _chatKeyDown;
+
+        /// <summary>
+        /// F: talk to the character the cursor is pointing at.
+        ///
+        /// Picking who to talk to is done with the cursor: OnMouseOver is the game's own
+        /// answer to "which character", so with several characters on the desktop the one
+        /// under the pointer is the one that answers.
+        ///
+        /// Why a key and not a mouse button: every mouse gesture on a character is taken.
+        /// Left click reports the balance, and the game binds a right-click on a seated
+        /// character to "stand up" -- that fires on the press itself, so a right-click
+        /// trigger never sees her still sitting (measured). A key has no such conflict.
+        /// </summary>
+        private static void PollChatHotkey()
+        {
+            bool down = (GetAsyncKeyState(VK_F) & 0x8000) != 0;
+            if (down && !_chatKeyDown)
+            {
+                Dbg("F key pressed -> chat request");
+                OnChatKey();
+            }
+            _chatKeyDown = down;
+        }
+
+        /// <summary>The F action: chat with whoever the cursor is pointing at.</summary>
+        internal static void OnChatKey()
+        {
+            if (!PluginEnabled) return;
+            if (Cfg == null || !Cfg.EnableChat.Value) return;
+
+            if (ChatFlow.IsInputOpen)
+            {
+                Dbg("chat key ignored: the input modal is already open");
+                return;
+            }
+
+            // Always leave the state evidence in the log: if the gate says no, the reason
+            // must be readable afterwards.
+            try { Dbg("=== chat key: " + SitState.Describe() + " ==="); }
+            catch (Exception e) { Dbg("chat key: sit probe failed: " + e.Message); }
+
+            // Which character? The game's own hover first, geometry as second chance.
+            bool onHer = TouchPatch.IsHoveringRecently;
+            if (!onHer)
+            {
+                onHer = TouchPatch.IsCursorOverCharacterByGeometry();
+                if (onHer) Dbg("chat key: hover recovered from cursor geometry");
+            }
+
+            if (!onHer)
+            {
+                Dbg("chat key ignored: cursor is not on any character");
+                EnqueueSpeak("先把鼠标放到想聊的角色身上，再按 F 呀");
+                return;
+            }
+
+            bool sitting = true;
+            if (Cfg.RequireSitting.Value)
+            {
+                try { sitting = SitState.IsSitting(); }
+                catch (Exception e)
+                {
+                    Dbg("OnChatKey: SitState failed: " + e.Message);
+                    sitting = true;   // fail open, see the class comment on SitState
+                }
+            }
+            else
+            {
+                Dbg("sit check skipped (RequireSitting = false)");
+            }
+
+            if (!sitting)
+            {
+                Dbg("chat key ignored: she is not sitting");
+                EnqueueSpeak("先让我坐下再聊吧");
+                return;
+            }
+
+            if (!Cfg.HasKey)
+            {
+                EnqueueSpeak("还没设置 DeepSeek Key，去设置面板点「AI 接入 Key」填一下");
+                return;
+            }
+
+            Dbg("chat key while sitting -> chat input");
+            ChatFlow.TryOpenInput();
+        }
 
         private static int ResolveHotkey()
         {
@@ -696,6 +1076,27 @@ namespace OcAI
                 BubbleUi.Show(_lastBubbleText, ComputeSpeakPos());
             }
             catch (Exception e) { Dbg("RefreshBubble: " + e.Message); }
+        }
+
+        /// <summary>
+        /// How long a line should stay on screen. A fixed 8 s is right for the pet's own
+        /// one-liners, but an AI answer of two or three sentences needs reading time, so
+        /// the duration grows with the text (roughly one extra second per nine chars).
+        /// </summary>
+        private static float BubbleSecondsFor(string text)
+        {
+            int len = string.IsNullOrEmpty(text) ? 0 : text.Length;
+            float sec = 8f + len / 9f;
+            if (sec < 8f) sec = 8f;
+            if (sec > 40f) sec = 40f;
+            return sec;
+        }
+
+        /// <summary>Speaks a line with an explicit on-screen duration.</summary>
+        private static void ShowBubble(string text, float seconds)
+        {
+            try { BubbleUi.NextShowSeconds = seconds; } catch { }
+            ShowBubble(text);
         }
 
         /// <summary>Make the character say something using the game's own UI.</summary>
